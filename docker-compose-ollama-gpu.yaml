@@ -1,19 +1,4 @@
 services:
-  app:
-    build: .
-    ports:
-      - 8000:8000
-      - 5678:5678
-    volumes:
-      - .:/code
-    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
-    restart: always
-    depends_on:
-      - ollama
-      - ollama-webui
-    networks:
-      - ollama-docker
-      
   ollama:
     volumes:
       - ./ollama/ollama:/root/.ollama
@@ -23,18 +8,38 @@ services:
     restart: unless-stopped
     image: docker.io/ollama/ollama:latest
     ports:
-      - 7869:11434
+      - 11434:11434
     environment:
       - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_BASE_URLS=
     networks:
-      - ollama-docker
+      - proxy
+      - default # lets Lingarr (inside gluetun) reach ollama:11434
+    profiles:
+      - AI
+      - all
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: all 
+              count: all
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ollama.rule=Host(`ollama.${DOMAIN}`)" # Public domain
+      - "traefik.http.routers.ollama.entrypoints=https"
+      - "traefik.http.routers.ollama.tls=true"
+      - "traefik.http.routers.ollama.tls.certresolver=cloudflare" # Use Cloudflare DNS challenge
+      - "traefik.http.services.ollama.loadbalancer.server.port=11434" # Change to your app's internal port
+      - "traefik.http.middlewares.my-auth.basicauth.users=${OLLAMA_BASIC_AUTH}"
+      - "traefik.http.routers.ollama.middlewares=crowdsec@file,my-auth@docker"
 
   ollama-webui:
     image: ghcr.io/open-webui/open-webui:main
@@ -46,18 +51,34 @@ services:
     ports:
       - 8080:8080
     environment: # https://docs.openwebui.com/getting-started/env-configuration#default_models
-      - OLLAMA_BASE_URLS=http://host.docker.internal:7869 #comma separated ollama hosts
+      - OLLAMA_BASE_URLS=http://ollama:11434 #comma separated ollama hosts
       - ENV=dev
-      - WEBUI_AUTH=False
+      - WEBUI_AUTH=True
       - WEBUI_NAME=valiantlynx AI
-      - WEBUI_URL=http://localhost:8080
-      - WEBUI_SECRET_KEY=t0p-s3cr3t
-      - NO_PROXY=host.docker.internal
+      - WEBUI_URL=http://192.168.50.112:8080, https://oi.local.${DOMAIN}
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - ENABLE_IMAGE_GENERATION=True
+      - COMFYUI_URL=http://comfyui:8188
     extra_hosts:
       - host.docker.internal:host-gateway
     restart: unless-stopped
+    healthcheck:
+      test: curl -f http://localhost:8080/health || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    profiles:
+      - AI
+      - all
     networks:
-      - ollama-docker
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.oi.rule=Host(`oi.local.${DOMAIN}`) && PathPrefix(`/`)" 
+      - "traefik.http.routers.oi.entrypoints=https"
+      - "traefik.http.routers.oi.tls=true"
+      - "traefik.http.services.oi.loadbalancer.server.port=8080"
 
 networks:
   ollama-docker:
